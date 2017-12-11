@@ -13,20 +13,24 @@ import (
 	"time"
 )
 
-type pathfn func(string, *os.File) error
+type pathfn func(string) error
+
+const eraseLine = "\033[K" // Return cursor to start of line and clean it
+const lineUp = "\033[1A"   // Move cursor one line up
 
 var scanned int                 // number of files scanned
-var filecount int               // global counter
-var fmtcount int                // counter for actual changes
-var dircount int                // counter for each directory
-var timeout uint 				// number of seconds to sleep
+var fileCount int               // global counter
+var fmtCount int                // counter for actual changes
+var dirCount int                // counter for each directory
 var args = []string{"-d", "-s"} // flags to be passed into gofmt
+var output = os.Stdout          // output for the gofmt changelog
+var timeout time.Duration       // number of seconds to sleep
 var width, _, _ = terminal.GetSize(int(os.Stdin.Fd()))
 
 func main() {
 	app := cli.NewApp()
 	app.Name = "Systematic go formatter"
-	app.Version = "0.0.1"
+	app.Version = "0.1.0"
 	app.Compiled = time.Now()
 	app.Authors = []cli.Author{
 		{
@@ -45,12 +49,12 @@ func main() {
 			Usage: "Prevent modification of any .go files found",
 		},
 		cli.UintFlag{
-			Name:  "sleep, s",
+			Name: "sleep, s",
 			Usage: "Sleep for `SECONDS` when each .go file is found. " +
 				"Use for debugging or reading gofmt output.",
 			Value: 0,
 		},
-		// TODO: parallelize the workload
+		// TODO: parallelize the workload (in a non-blocking manner)
 		cli.UintFlag{
 			Name:  "threads, t",
 			Usage: "Number of `THREADS` to split the work",
@@ -63,11 +67,11 @@ func main() {
 		},
 	}
 
-	app.Action = climain
+	app.Action = cliMain
 	app.Run(os.Args)
 }
 
-func climain(c *cli.Context) (err error) {
+func cliMain(c *cli.Context) (err error) {
 	start := time.Now()
 
 	if c.NArg() == 0 {
@@ -78,15 +82,14 @@ func climain(c *cli.Context) (err error) {
 		return errors.New("could not determine terminal width")
 	}
 
-	timeout = c.Uint("sleep")
+	timeout = time.Second * time.Duration(c.Uint("sleep"))
 
-	var spacer string   // give newline for every directory after the first one
-	var output *os.File // output for the gofmt changelog
+	var spacer string // give newline for every directory after the first one
 
-	if argout := c.String("file"); argout == "" {
-		output = os.Stdout
-	} else if output, err = getLog(argout); err != nil {
-		return
+	if argout := c.String("file"); argout != "" {
+		if output, err = getLog(argout); err != nil {
+			return
+		}
 	}
 
 	// modify flags to pass into gofmt based on whether it should modify the source code or not
@@ -98,7 +101,7 @@ func climain(c *cli.Context) (err error) {
 	for _, path := range c.Args() {
 		fmt.Print(spacer)
 
-		if err := handlePath(path, output, fmtFile, fmtDir); err != nil {
+		if err := handlePath(path, fmtFile, fmtDir); err != nil {
 			fmt.Errorf("dirfmt: error processing %s: %s", path, err)
 		}
 
@@ -107,13 +110,13 @@ func climain(c *cli.Context) (err error) {
 
 	// in read-only mode, no source code is modified
 	if c.Bool("readonly") {
-		fmtcount = 0
+		fmtCount = 0
 	}
 
 	fmt.Printf("\n%d %s scanned, %d .go %s found, %d reformatted in %s.\n",
 		scanned, sva("file", scanned != 1),
-		filecount, sva("file", filecount != 1),
-		fmtcount, time.Now().Sub(start))
+		fileCount, sva("file", fileCount != 1),
+		fmtCount, time.Now().Sub(start))
 
 	return nil
 }
@@ -131,7 +134,7 @@ func getLog(path string) (output *os.File, err error) {
 }
 
 // handles a path, whether it is file, directory, or invalid
-func handlePath(path string, output *os.File, filefn pathfn, dirfn pathfn) (err error) {
+func handlePath(path string, filefn pathfn, dirfn pathfn) (err error) {
 	f, err := os.Stat(path)
 	if err != nil {
 		return
@@ -140,9 +143,9 @@ func handlePath(path string, output *os.File, filefn pathfn, dirfn pathfn) (err 
 	// determine the nature of the path
 	switch mode := f.Mode(); {
 	case mode.IsRegular():
-		err = filefn(path, output)
+		err = filefn(path)
 	case mode.IsDir():
-		err = dirfn(path, output)
+		err = dirfn(path)
 	}
 
 	return // silently ignore invalid files, since we're not going to touch it
@@ -157,7 +160,7 @@ func sva(word string, plural bool) string {
 }
 
 // run gofmt on a single .go file
-func fmtFile(file string, output *os.File) error {
+func fmtFile(file string) error {
 	scanned++
 
 	// detecting go source code is done by naive extension comparison
@@ -165,12 +168,12 @@ func fmtFile(file string, output *os.File) error {
 		return nil // just ignore non-go source files
 	}
 
-	time.Sleep(time.Second * time.Duration(timeout))
-	inplace(".go file found: " + file)
+	time.Sleep(timeout) // give time to read output
+	inPlace(".go file found: " + file)
 
 	// increment global counters
-	filecount++
-	dircount++
+	fileCount++
+	dirCount++
 
 	// run gofmt with specified flags
 	out, err := exec.Command("gofmt", append(args, file)...).Output()
@@ -182,7 +185,7 @@ func fmtFile(file string, output *os.File) error {
 
 	// when source code is not modified, the output is empty
 	if strout != "" {
-		fmtcount++
+		fmtCount++
 	}
 
 	output.WriteString(strout) // append any change log to the end of the output
@@ -191,35 +194,36 @@ func fmtFile(file string, output *os.File) error {
 }
 
 // run gofmt on all .go files in a directory and its subdirectories
-func fmtDir(dir string, output *os.File) (err error) {
+func fmtDir(dir string) error {
 	fmt.Printf("Scanning %s for .go files...\n", dir)
 
-	dircount = 0 // reset directory counter for every directory argument
+	dirCount = 0 // reset directory counter for every directory argument
 
 	// walk through every file in the directory recursively and call gofmt on them
-	err = filepath.Walk(dir, func(file string, f os.FileInfo, err error) error {
-		return fmtFile(file, output)
+	err := filepath.Walk(dir, func(file string, f os.FileInfo, err error) error {
+		return fmtFile(file)
 	})
 
 	// directory counter is only used for checking whether a directory is empty
-	if dircount == 0 {
+	if dirCount == 0 {
 		fmt.Println("No .go files were found in", dir)
 	}
 
-	return
+	return err
 }
 
 // TODO: consider interaction with gofmt output
+// TODO: fix (probably has to do with last length)
 // prints out strings "in place": i.e., without cluttering up the terminal
 // references:
 // https://stackoverflow.com/a/45422726
 // https://stackoverflow.com/a/47170056
-func inplace(str string) {
-	back := "\r\033[K"
+func inPlace(str string) {
+	back := "\r" + eraseLine
 	lines := (len(str) - 1) / width
 
 	for i := 0; i < lines; i++ {
-		back += "\033[1A\033[K"
+		back += lineUp + eraseLine
 	}
 
 	fmt.Print(back, str)
