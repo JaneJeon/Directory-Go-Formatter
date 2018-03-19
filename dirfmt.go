@@ -10,22 +10,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 type pathfn func(string) error
 
-const eraseLine = "\033[K" // Return cursor to start of line and clean it
-const lineUp = "\033[1A"   // Move cursor one line up
+const (
+	eraseLine = "\033[K" // Return cursor to start of line and clean it
+	lineUp = "\033[1A"   // Move cursor one line up
+)
 
-var scanned int                 // number of files scanned
-var fileCount int               // global counter
-var fmtCount int                // counter for actual changes
-var dirCount int                // counter for each directory
-var args = []string{"-d", "-s"} // flags to be passed into gofmt
-var output = os.Stdout          // output for the gofmt changelog
-var timeout time.Duration       // number of seconds to sleep
-var width, _, _ = terminal.GetSize(int(os.Stdin.Fd()))
+var (
+	scanned int                 // number of files scanned
+	fileCount int               // global counter
+	fmtCount int                // counter for actual changes
+	dirCount int                // counter for each directory
+	args = []string{"-d", "-s"} // flags to be passed into gofmt
+	dirs []string               // directories to search
+	output = os.Stdout          // output for the gofmt changelog
+	timeout time.Duration       // number of seconds to sleep
+	width, _, _ = terminal.GetSize(int(os.Stdin.Fd()))
+)
 
 func main() {
 	app := cli.NewApp()
@@ -74,10 +80,19 @@ func main() {
 func cliMain(c *cli.Context) (err error) {
 	start := time.Now()
 
+	// if no path is specified, uses working directory
 	if c.NArg() == 0 {
-		return errors.New("you must supply at least one file or directory to check")
+		pwd, err := exec.Command("pwd").Output() // yupp
+		if err != nil {
+			return err
+		}
+
+		currDir := strings.TrimSpace(string(pwd))
+		fmt.Println("Using current directory:", currDir)
+		dirs = []string{currDir}
 	}
 
+	// TODO: allow use of file mode to allow running from IDE
 	if width <= 0 {
 		return errors.New("could not determine terminal width")
 	}
@@ -97,8 +112,12 @@ func cliMain(c *cli.Context) (err error) {
 		args = append(args, "-w")
 	}
 
+	if dirs == nil {
+		dirs = c.Args()
+	}
+
 	// go through each file/dir in the argument to process them
-	for _, path := range c.Args() {
+	for _, path := range dirs {
 		fmt.Print(spacer)
 
 		if err := handlePath(path, fmtFile, fmtDir); err != nil {
@@ -133,7 +152,7 @@ func getLog(path string) (output *os.File, err error) {
 	return
 }
 
-// handles a path, whether it is file, directory, or invalid
+// handles a path, whether it is a file or a directory
 func handlePath(path string, filefn pathfn, dirfn pathfn) (err error) {
 	f, err := os.Stat(path)
 	if err != nil {
@@ -141,11 +160,10 @@ func handlePath(path string, filefn pathfn, dirfn pathfn) (err error) {
 	}
 
 	// determine the nature of the path
-	switch mode := f.Mode(); {
-	case mode.IsRegular():
-		err = filefn(path)
-	case mode.IsDir():
+	if mode := f.Mode(); mode.IsDir() {
 		err = dirfn(path)
+	} else {
+		err = filefn(path)
 	}
 
 	return // silently ignore invalid files, since we're not going to touch it
@@ -169,7 +187,8 @@ func fmtFile(file string) error {
 	}
 
 	time.Sleep(timeout) // give time to read output
-	inPlace(".go file found: " + file)
+	//inPlace(".go file found: " + file)
+	fmt.Println(".go file found:", file)
 
 	// increment global counters
 	fileCount++
